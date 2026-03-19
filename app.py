@@ -17,10 +17,9 @@ load_dotenv()
 # ─── API Keys ────────────────────────────────────────────────────────────────
 
 def check_api_keys():
-    # Streamlit Cloud uses st.secrets; local dev uses .env via os.getenv
     def get_key(name):
         try:
-            val = st.secrets[name]   # dict-style access, not callable
+            val = st.secrets[name]   #
             if val:
                 return val
         except Exception:
@@ -147,23 +146,42 @@ def search_videos(query: str, platform: str, max_results: int = 5) -> list[dict]
 # ─── Download + extract audio ─────────────────────────────────────────────────
 
 def download_and_extract_audio(url: str, prefix: str = "tmp") -> tuple:
+    # Audio-only download avoids the large video file and is less likely
+    # to be blocked. Browser-like headers bypass datacenter IP blocks.
+    audio_path = f"{prefix}.mp3"
     ydl_opts = {
-        "format":      "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best",
-        "outtmpl":     f"{prefix}.%(ext)s",
-        "quiet":       True,
-        "overwrites":  True,
-        "no_warnings": True,
+        "format":        "bestaudio/best",
+        "outtmpl":       audio_path,
+        "quiet":         True,
+        "overwrites":    True,
+        "no_warnings":   True,
+        "postprocessors": [{
+            "key":            "FFmpegExtractAudio",
+            "preferredcodec": "mp3",
+        }],
+        "http_headers": {
+            "User-Agent":      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Accept-Language": "en-US,en;q=0.9",
+            "Accept":          "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Referer":         "https://www.youtube.com/",
+        },
+        "extractor_args": {
+            "youtube": {
+                "player_client": ["web", "android"],
+            }
+        },
+        "retries":       5,
+        "fragment_retries": 5,
     }
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info     = ydl.extract_info(url, download=True)
-            vid_path = ydl.prepare_filename(info)
-        clip       = VideoFileClip(vid_path)
-        audio_path = f"{prefix}.mp3"
-        clip.audio.write_audiofile(audio_path, logger=None)
-        clip.close()
-        return vid_path, audio_path
-    except Exception:
+            ydl.download([url])
+        # yt-dlp appends .mp3 after postprocessing — handle both cases
+        final_path = audio_path if os.path.exists(audio_path) else audio_path + ".mp3"
+        if not os.path.exists(final_path):
+            return None, None
+        return None, final_path  # no video file needed anymore
+    except Exception as e:
         return None, None
 
 # ─── Transcribe ───────────────────────────────────────────────────────────────
@@ -393,7 +411,7 @@ def render_dashboard(product: str, results: list[dict]):
         paper_bgcolor="rgba(0,0,0,0)",
         showlegend=False,
     )
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, width='stretch')
     st.markdown("---")
 
     # ── Per-video cards ───────────────────────────────────────────────────────
@@ -425,7 +443,7 @@ def render_dashboard(product: str, results: list[dict]):
                 col_thumb, col_meta = st.columns([1, 2])
                 with col_thumb:
                     if thumbnail:
-                        st.image(thumbnail, use_container_width=True)
+                        st.image(thumbnail, width='stretch')
                 with col_meta:
                     st.markdown(f"**[{title}]({url})**")
                     if channel:
