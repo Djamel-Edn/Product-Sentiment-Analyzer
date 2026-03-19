@@ -17,8 +17,8 @@ load_dotenv()
 # ─── API Keys ────────────────────────────────────────────────────────────────
 
 def check_api_keys():
-    groq_key   = os.getenv("GROQ_API_KEY")
-    gemini_key = os.getenv("GEMINI_API_KEY")
+    groq_key   = st.secrets("GROQ_API_KEY")
+    gemini_key = st.secrets("GEMINI_API_KEY")
     missing = []
     if not groq_key:   missing.append("GROQ_API_KEY")
     if not gemini_key: missing.append("GEMINI_API_KEY")
