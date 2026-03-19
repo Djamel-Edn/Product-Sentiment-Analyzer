@@ -14,12 +14,24 @@ except ImportError:
 
 load_dotenv()
 
+# ─── Proxy config ─────────────────────────────────────────────────────────────
+# Set PROXY_URL in your environment/secrets to route through a residential IP.
+# Format: "http://user:pass@host:port" or "http://host:port"
+# Free option to test: https://webshare.io (10 free proxies)
+# If not set, the app runs without a proxy (will 403 on cloud hosts).
+PROXY_URL = None
+try:
+    PROXY_URL = st.secrets.get("PROXY_URL") or os.getenv("PROXY_URL")
+except Exception:
+    PROXY_URL = os.getenv("PROXY_URL")
+
 # ─── API Keys ────────────────────────────────────────────────────────────────
 
 def check_api_keys():
+    # Streamlit Cloud uses st.secrets; local dev uses .env via os.getenv
     def get_key(name):
         try:
-            val = st.secrets[name]   #
+            val = st.secrets[name]   # dict-style access, not callable
             if val:
                 return val
         except Exception:
@@ -90,6 +102,8 @@ def search_videos(query: str, platform: str, max_results: int = 5) -> list[dict]
         min_duration = 10
 
     ydl_opts = {"quiet": True, "extract_flat": True, "no_warnings": True}
+    if PROXY_URL:
+        ydl_opts["proxy"] = PROXY_URL
     results  = []
 
     try:
@@ -172,6 +186,7 @@ def download_and_extract_audio(url: str, prefix: str = "tmp") -> tuple:
         },
         "retries":       5,
         "fragment_retries": 5,
+        **({"proxy": PROXY_URL} if PROXY_URL else {}),
     }
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
