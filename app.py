@@ -17,8 +17,18 @@ load_dotenv()
 # ─── API Keys ────────────────────────────────────────────────────────────────
 
 def check_api_keys():
-    groq_key   = st.secrets("GROQ_API_KEY")
-    gemini_key = st.secrets("GEMINI_API_KEY")
+    # Streamlit Cloud uses st.secrets; local dev uses .env via os.getenv
+    def get_key(name):
+        try:
+            val = st.secrets[name]   # dict-style access, not callable
+            if val:
+                return val
+        except Exception:
+            pass
+        return os.getenv(name)
+
+    groq_key   = get_key("GROQ_API_KEY")
+    gemini_key = get_key("GEMINI_API_KEY")
     missing = []
     if not groq_key:   missing.append("GROQ_API_KEY")
     if not gemini_key: missing.append("GEMINI_API_KEY")
@@ -533,6 +543,22 @@ if product and st.button("🔍 Analyze reviews", type="primary"):
     status_text.empty()
     st.markdown("---")
     render_dashboard(product, all_results)
+
+    # Master review
+    st.markdown("---")
+    st.subheader("Gemini's Master Review")
+    st.caption("A synthesized verdict written by Gemini after reading all the reviews above.")
+    with st.spinner("Gemini is writing its master review..."):
+        master = gemini_master_review(product, all_results)
+    valid_scores = [r["score"] for r in all_results if isinstance(r.get("score"), int)]
+    avg_score = round(sum(valid_scores) / len(valid_scores), 1) if valid_scores else 5
+    border_color = score_color(avg_score)
+    st.markdown(
+        '<div style="border:1px solid ' + border_color + ';border-radius:12px;padding:24px 28px;margin-top:8px">'
+        + master.replace("\n", "<br>") +
+        '</div>',
+        unsafe_allow_html=True
+    )
 
     # ── Gemini master review ──────────────────────────────────────────────────
     st.markdown("---")
