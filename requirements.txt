@@ -1,6 +1,12 @@
 streamlit>=1.30.0
 yt-dlp>=2024.1.1
+groq>=0.5.0
 google-genai>=0.3.0
-youtube-transcript-api>=0.6.2
+moviepy==1.0.3
 plotly>=5.18.0
 python-dotenv>=1.0.1
+decorator==4.4.2
+imageio>=2.5
+imageio-ffmpeg>=0.2.0
+proglog<=1.0.0
+tqdm>=4.11.2
