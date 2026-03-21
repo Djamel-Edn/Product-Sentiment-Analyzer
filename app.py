@@ -27,6 +27,36 @@ try:
 except Exception:
     PROXY_URL = os.getenv("PROXY_URL")
 
+# ─── YouTube cookies ──────────────────────────────────────────────────────────
+# Set YOUTUBE_COOKIES_B64 env var to a base64-encoded cookies.txt file.
+# Export from Chrome using "Get cookies.txt LOCALLY" extension while on youtube.com
+def get_cookies_file():
+    cookies_b64 = ""
+    try:
+        cookies_b64 = st.secrets["YOUTUBE_COOKIES_B64"]
+    except Exception:
+        cookies_b64 = os.getenv("YOUTUBE_COOKIES_B64", "")
+
+    if not cookies_b64:
+        print("COOKIES: not set")
+        return None
+
+    print(f"COOKIES: found, b64 length={len(cookies_b64)}")
+    try:
+        cookies_bytes = base64.b64decode(cookies_b64.strip())
+        cookies_text  = cookies_bytes.decode("utf-8")
+        tmp = tempfile.NamedTemporaryFile(
+            mode="w", suffix=".txt", delete=False, prefix="ytcookies_"
+        )
+        tmp.write(cookies_text)
+        tmp.close()
+        print(f"COOKIES: written to {tmp.name}, lines={len(cookies_text.splitlines())}")
+        return tmp.name
+    except Exception as e:
+        print(f"COOKIES: failed to decode/write — {e}")
+        return None
+
+
 # ─── API Keys ────────────────────────────────────────────────────────────────
 
 def check_api_keys():
@@ -162,9 +192,9 @@ def search_videos(query: str, platform: str, max_results: int = 5) -> list[dict]
 # ─── Download + extract audio ─────────────────────────────────────────────────
 
 def download_and_extract_audio(url: str, prefix: str = "tmp") -> tuple:
-    # Audio-only download avoids the large video file and is less likely
-    # to be blocked. Browser-like headers bypass datacenter IP blocks.
-    audio_path = f"{prefix}.mp3"
+    audio_path   = f"{prefix}.mp3"
+    cookies_file = get_cookies_file()
+
     ydl_opts = {
         "format":        "bestaudio/best",
         "outtmpl":       audio_path,
@@ -182,24 +212,28 @@ def download_and_extract_audio(url: str, prefix: str = "tmp") -> tuple:
             "Referer":         "https://www.youtube.com/",
         },
         "extractor_args": {
-            "youtube": {
-                "player_client": ["web", "android"],
-            }
+            "youtube": {"player_client": ["web", "android"]},
         },
-        "retries":       5,
+        "retries":          5,
         "fragment_retries": 5,
-        **({"proxy": PROXY_URL} if PROXY_URL else {}),
     }
+    if cookies_file:
+        ydl_opts["cookiefile"] = cookies_file
+        print(f"COOKIES: using cookiefile={cookies_file}")
+    if PROXY_URL:
+        ydl_opts["proxy"] = PROXY_URL
+
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             ydl.download([url])
-        # yt-dlp appends .mp3 after postprocessing — handle both cases
         final_path = audio_path if os.path.exists(audio_path) else audio_path + ".mp3"
         if not os.path.exists(final_path):
             return None, None
-        return None, final_path  # no video file needed anymore
+        return None, final_path
     except Exception as e:
+        print(f"DOWNLOAD ERROR: {e}")
         return None, None
+
 
 # ─── Transcribe ───────────────────────────────────────────────────────────────
 
@@ -579,18 +613,18 @@ if product and st.button("🔍 Analyze reviews", type="primary"):
     st.markdown("---")
     render_dashboard(product, all_results)
 
-
-    # ── Gemini master review ──────────────────────────────────────────────────
+    # Master review
     st.markdown("---")
     st.subheader("Gemini's Master Review")
     st.caption("A synthesized verdict written by Gemini after reading all the reviews above.")
-    with st.spinner("Gemini is writing its master review…"):
+    with st.spinner("Gemini is writing its master review..."):
         master = gemini_master_review(product, all_results)
-    color = score_color(round(sum(r["score"] for r in all_results if isinstance(r.get("score"), int)) /
-                              max(1, sum(1 for r in all_results if isinstance(r.get("score"), int))), 1))
+    valid_scores = [r["score"] for r in all_results if isinstance(r.get("score"), int)]
+    avg_score = round(sum(valid_scores) / len(valid_scores), 1) if valid_scores else 5
+    border_color = score_color(avg_score)
     st.markdown(
-        f'<div style="border:1px solid {color};border-radius:12px;padding:24px 28px;margin-top:8px">'
-        f'{master}'
-        f'</div>',
+        '<div style="border:1px solid ' + border_color + ';border-radius:12px;padding:24px 28px;margin-top:8px">'
+        + master.replace("\n", "<br>") +
+        '</div>',
         unsafe_allow_html=True
     )
