@@ -1,37 +1,88 @@
 import streamlit as st
 import os
+import base64
+import tempfile
 import re
 import json
 import yt_dlp
 import plotly.graph_objects as go
 from dotenv import load_dotenv
+from groq import Groq
 from google import genai
-from youtube_transcript_api import YouTubeTranscriptApi, NoTranscriptFound, TranscriptsDisabled
+try:
+    from moviepy import VideoFileClip
+except ImportError:
+    from moviepy.editor import VideoFileClip
 
 load_dotenv()
+
+# ─── Proxy config ─────────────────────────────────────────────────────────────
+# Set PROXY_URL in your environment/secrets to route through a residential IP.
+# Format: "http://user:pass@host:port" or "http://host:port"
+# Free option to test: https://webshare.io (10 free proxies)
+# If not set, the app runs without a proxy (will 403 on cloud hosts).
+PROXY_URL = None
+try:
+    PROXY_URL = st.secrets.get("PROXY_URL") or os.getenv("PROXY_URL")
+except Exception:
+    PROXY_URL = os.getenv("PROXY_URL")
+
+# ─── YouTube cookies ──────────────────────────────────────────────────────────
+# Set YOUTUBE_COOKIES_B64 env var to a base64-encoded cookies.txt file.
+# Export from Chrome using "Get cookies.txt LOCALLY" extension while on youtube.com
+def get_cookies_file():
+    cookies_b64 = ""
+    try:
+        cookies_b64 = st.secrets["YOUTUBE_COOKIES_B64"]
+    except Exception:
+        cookies_b64 = os.getenv("YOUTUBE_COOKIES_B64", "")
+
+    if not cookies_b64:
+        print("COOKIES: not set")
+        return None
+
+    print(f"COOKIES: found, b64 length={len(cookies_b64)}")
+    try:
+        cookies_bytes = base64.b64decode(cookies_b64.strip())
+        cookies_text  = cookies_bytes.decode("utf-8")
+        tmp = tempfile.NamedTemporaryFile(
+            mode="w", suffix=".txt", delete=False, prefix="ytcookies_"
+        )
+        tmp.write(cookies_text)
+        tmp.close()
+        print(f"COOKIES: written to {tmp.name}, lines={len(cookies_text.splitlines())}")
+        return tmp.name
+    except Exception as e:
+        print(f"COOKIES: failed to decode/write — {e}")
+        return None
+
 
 # ─── API Keys ────────────────────────────────────────────────────────────────
 
 def check_api_keys():
+    # Streamlit Cloud uses st.secrets; local dev uses .env via os.getenv
     def get_key(name):
         try:
-            val = st.secrets[name]
+            val = st.secrets[name]   # dict-style access, not callable
             if val:
                 return val
         except Exception:
             pass
         return os.getenv(name)
 
+    groq_key   = get_key("GROQ_API_KEY")
     gemini_key = get_key("GEMINI_API_KEY")
     missing = []
+    if not groq_key:   missing.append("GROQ_API_KEY")
     if not gemini_key: missing.append("GEMINI_API_KEY")
-    return gemini_key, missing
+    return groq_key, gemini_key, missing
 
-gemini_key, missing_keys = check_api_keys()
+groq_key, gemini_key, missing_keys = check_api_keys()
 if missing_keys:
     st.error(f"Missing API keys: {', '.join(missing_keys)}")
     st.stop()
 
+client_groq   = Groq(api_key=groq_key)
 client_gemini = genai.Client(api_key=gemini_key)
 
 # ─── Brand channel detection ─────────────────────────────────────────────────
@@ -83,6 +134,8 @@ def search_videos(query: str, platform: str, max_results: int = 5) -> list[dict]
         min_duration = 10
 
     ydl_opts = {"quiet": True, "extract_flat": True, "no_warnings": True}
+    if PROXY_URL:
+        ydl_opts["proxy"] = PROXY_URL
     results  = []
 
     try:
@@ -121,7 +174,6 @@ def search_videos(query: str, platform: str, max_results: int = 5) -> list[dict]
                 results.append({
                     "title":     entry.get("title", "Unknown"),
                     "url":       url,
-                    "vid_id":    vid_id,
                     "duration":  duration,
                     "platform":  platform,
                     "thumbnail": thumbnail,
@@ -137,31 +189,65 @@ def search_videos(query: str, platform: str, max_results: int = 5) -> list[dict]
 
     return results
 
-# ─── Transcript fetch (YouTube Transcript API) ────────────────────────────────
+# ─── Download + extract audio ─────────────────────────────────────────────────
 
-def get_transcript(video_id: str) -> str:
-    """
-    Fetch transcript directly from YouTube captions.
-    Tries English first, then any available language.
-    No download, no auth, no bot detection.
-    """
+def download_and_extract_audio(url: str, prefix: str = "tmp") -> tuple:
+    audio_path   = f"{prefix}.mp3"
+    cookies_file = get_cookies_file()
+
+    ydl_opts = {
+        "format":        "bestaudio/best",
+        "outtmpl":       audio_path,
+        "quiet":         True,
+        "overwrites":    True,
+        "no_warnings":   True,
+        "postprocessors": [{
+            "key":            "FFmpegExtractAudio",
+            "preferredcodec": "mp3",
+        }],
+        "http_headers": {
+            "User-Agent":      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Accept-Language": "en-US,en;q=0.9",
+            "Accept":          "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Referer":         "https://www.youtube.com/",
+        },
+        "extractor_args": {
+            "youtube": {"player_client": ["web", "android"]},
+        },
+        "retries":          5,
+        "fragment_retries": 5,
+    }
+    if cookies_file:
+        ydl_opts["cookiefile"] = cookies_file
+        print(f"COOKIES: using cookiefile={cookies_file}")
+    if PROXY_URL:
+        ydl_opts["proxy"] = PROXY_URL
+
     try:
-        transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
-        # Prefer manually created English, then auto-generated English, then anything
-        try:
-            transcript = transcript_list.find_transcript(["en", "en-US", "en-GB"])
-        except Exception:
-            transcript = transcript_list.find_generated_transcript(
-                [t.language_code for t in transcript_list]
-            )
-        entries = transcript.fetch()
-        return " ".join(e.get("text", "") for e in entries).strip()
-    except TranscriptsDisabled:
-        return "[Transcripts disabled for this video]"
-    except NoTranscriptFound:
-        return "[No transcript available]"
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            ydl.download([url])
+        final_path = audio_path if os.path.exists(audio_path) else audio_path + ".mp3"
+        if not os.path.exists(final_path):
+            return None, None
+        return None, final_path
     except Exception as e:
-        return f"[Transcript error: {e}]"
+        print(f"DOWNLOAD ERROR: {e}")
+        return None, None
+
+
+# ─── Transcribe ───────────────────────────────────────────────────────────────
+
+def transcribe(audio_path: str) -> str:
+    try:
+        with open(audio_path, "rb") as f:
+            response = client_groq.audio.transcriptions.create(
+                file=(audio_path, f.read()),
+                model="whisper-large-v3",
+                response_format="text",
+            )
+        return response if isinstance(response, str) else getattr(response, "text", str(response))
+    except Exception as e:
+        return f"[Transcription failed: {e}]"
 
 # ─── Gemini sentiment ─────────────────────────────────────────────────────────
 
@@ -216,6 +302,16 @@ confidence must be exactly one of: high, medium, low
     except Exception as e:
         return {"score": 5, "verdict": "Mixed", "summary": f"Analysis failed: {e}",
                 "pros": [], "cons": [], "confidence": "low"}
+
+# ─── Cleanup ──────────────────────────────────────────────────────────────────
+
+def cleanup(*paths):
+    for p in paths:
+        try:
+            if p and os.path.exists(p):
+                os.remove(p)
+        except Exception:
+            pass
 
 # ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -443,31 +539,25 @@ def render_dashboard(product: str, results: list[dict]):
 
 def process_video(video: dict, product: str, idx: int, total: int,
                   progress_bar, status_text) -> dict:
-    title    = video["title"]
-    url      = video["url"]
-    vid_id   = video.get("vid_id", "")
+    title  = video["title"]
+    url    = video["url"]
+    prefix = f"tmp_{video['platform']}_{idx}"
 
-    # Extract video ID from URL if not stored
-    if not vid_id:
-        m = re.search(r"(?:v=|shorts/)([A-Za-z0-9_-]{11})", url)
-        vid_id = m.group(1) if m else ""
+    status_text.text(f"[{idx}/{total}] Downloading — {title[:55]}…")
+    vid_path, audio_path = download_and_extract_audio(url, prefix)
 
-    if not vid_id:
+    if not audio_path:
         return {**video, "score": None, "verdict": "—", "summary": "—",
                 "pros": [], "cons": [], "confidence": "low",
-                "error": "Could not extract video ID"}
+                "error": "Download or audio extraction failed"}
 
-    status_text.text(f"[{idx}/{total}] Fetching transcript — {title[:50]}…")
-    transcript = get_transcript(vid_id)
+    status_text.text(f"[{idx}/{total}] Transcribing — {title[:55]}…")
+    transcript = transcribe(audio_path)
 
-    if transcript.startswith("["):
-        return {**video, "score": None, "verdict": "—", "summary": transcript,
-                "pros": [], "cons": [], "confidence": "low",
-                "error": transcript}
-
-    status_text.text(f"[{idx}/{total}] Analyzing — {title[:50]}…")
+    status_text.text(f"[{idx}/{total}] Analyzing — {title[:55]}…")
     sentiment = analyze_sentiment(transcript, product, title)
 
+    cleanup(vid_path, audio_path)
     return {**video, **sentiment}
 
 # ─── UI ───────────────────────────────────────────────────────────────────────
