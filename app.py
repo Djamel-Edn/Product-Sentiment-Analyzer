@@ -16,20 +16,12 @@ except ImportError:
 
 load_dotenv()
 
-# ─── Proxy config ─────────────────────────────────────────────────────────────
-# Set PROXY_URL in your environment/secrets to route through a residential IP.
-# Format: "http://user:pass@host:port" or "http://host:port"
-# Free option to test: https://webshare.io (10 free proxies)
-# If not set, the app runs without a proxy (will 403 on cloud hosts).
 PROXY_URL = None
 try:
     PROXY_URL = st.secrets.get("PROXY_URL") or os.getenv("PROXY_URL")
 except Exception:
     PROXY_URL = os.getenv("PROXY_URL")
 
-# ─── YouTube cookies ──────────────────────────────────────────────────────────
-# Set YOUTUBE_COOKIES_B64 env var to a base64-encoded cookies.txt file.
-# Export from Chrome using "Get cookies.txt LOCALLY" extension while on youtube.com
 def get_cookies_file():
     cookies_b64 = ""
     try:
@@ -43,8 +35,11 @@ def get_cookies_file():
 
     print(f"COOKIES: found, b64 length={len(cookies_b64)}")
     try:
-        cookies_bytes = base64.b64decode(cookies_b64.strip())
-        cookies_text  = cookies_bytes.decode("utf-8")
+        padded = cookies_b64.strip()
+        missing = len(padded) % 4
+        if missing:
+            padded += "=" * (4 - missing)
+        cookies_text = base64.b64decode(padded).decode("utf-8")
         tmp = tempfile.NamedTemporaryFile(
             mode="w", suffix=".txt", delete=False, prefix="ytcookies_"
         )
@@ -56,14 +51,10 @@ def get_cookies_file():
         print(f"COOKIES: failed to decode/write — {e}")
         return None
 
-
-# ─── API Keys ────────────────────────────────────────────────────────────────
-
 def check_api_keys():
-    # Streamlit Cloud uses st.secrets; local dev uses .env via os.getenv
     def get_key(name):
         try:
-            val = st.secrets[name]   # dict-style access, not callable
+            val = st.secrets[name]
             if val:
                 return val
         except Exception:
@@ -85,9 +76,6 @@ if missing_keys:
 client_groq   = Groq(api_key=groq_key)
 client_gemini = genai.Client(api_key=gemini_key)
 
-# ─── Brand channel detection ─────────────────────────────────────────────────
-
-# Known official brand keywords — channels containing these are skipped
 BRAND_KEYWORDS = [
     "samsung", "apple", "google", "sony", "huawei", "xiaomi", "oppo", "oneplus",
     "motorola", "nokia", "lg electronics", "microsoft", "official", "officiel",
@@ -95,48 +83,31 @@ BRAND_KEYWORDS = [
 ]
 
 def is_brand_channel(channel: str, product: str) -> bool:
-    """Return True if the channel looks like an official brand or manufacturer."""
     if not channel:
         return False
     ch = channel.lower().strip()
-
-    # Extract the first word(s) of the product name as the likely brand
     product_brand = product.lower().split()[0] if product else ""
-
-    # If channel name IS the brand name or starts with it → skip
     if product_brand and (ch == product_brand or ch.startswith(product_brand)):
         return True
-
-    # Generic official-sounding channel keywords
     for kw in BRAND_KEYWORDS:
         if kw in ch:
             return True
-
     return False
 
-# ─── Video search ─────────────────────────────────────────────────────────────
-
 def search_videos(query: str, platform: str, max_results: int = 5) -> list[dict]:
-    """
-    platform="youtube" → long-form independent reviews (1–15 min)
-    platform="shorts"  → true YouTube Shorts (≤60 s, /shorts/ URL format)
-    Both exclude official brand channels.
-    """
     if platform == "youtube":
-        # "review" + "-official" biases toward independent reviewers
         search_url   = f"ytsearch{max_results * 4}:{query} review -official"
         max_duration = 900
         min_duration = 60
     else:
-        # "#shorts" is the canonical tag creators use for Shorts
         search_url   = f"ytsearch{max_results * 4}:{query} #shorts review"
-        max_duration = 60   # true Shorts are ≤ 60 s
+        max_duration = 60
         min_duration = 10
 
     ydl_opts = {"quiet": True, "extract_flat": True, "no_warnings": True}
     if PROXY_URL:
         ydl_opts["proxy"] = PROXY_URL
-    results  = []
+    results = []
 
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -146,31 +117,21 @@ def search_videos(query: str, platform: str, max_results: int = 5) -> list[dict]
             for entry in entries:
                 if not entry:
                     continue
-
                 duration = entry.get("duration") or 0
                 if duration > max_duration or duration < min_duration:
                     continue
-
                 channel = (entry.get("uploader") or entry.get("channel") or "").strip()
-
-                # Skip official brand channels
                 if is_brand_channel(channel, query):
                     continue
-
                 vid_id = entry.get("id", "")
                 url    = entry.get("url") or entry.get("webpage_url") or ""
                 if not url and vid_id:
                     url = f"https://www.youtube.com/watch?v={vid_id}"
-
-                # For true Shorts, use the /shorts/ URL so it opens in Shorts player
                 if platform == "shorts" and vid_id:
                     url = f"https://www.youtube.com/shorts/{vid_id}"
-
                 if not url:
                     continue
-
                 thumbnail = f"https://i.ytimg.com/vi/{vid_id}/hqdefault.jpg" if vid_id else ""
-
                 results.append({
                     "title":     entry.get("title", "Unknown"),
                     "url":       url,
@@ -180,16 +141,12 @@ def search_videos(query: str, platform: str, max_results: int = 5) -> list[dict]
                     "channel":   channel,
                     "views":     entry.get("view_count") or 0,
                 })
-
                 if len(results) >= max_results:
                     break
-
     except Exception as e:
         st.warning(f"Search error ({platform}): {e}")
 
     return results
-
-# ─── Download + extract audio ─────────────────────────────────────────────────
 
 def download_and_extract_audio(url: str, prefix: str = "tmp") -> tuple:
     audio_path   = f"{prefix}.mp3"
@@ -234,9 +191,6 @@ def download_and_extract_audio(url: str, prefix: str = "tmp") -> tuple:
         print(f"DOWNLOAD ERROR: {e}")
         return None, None
 
-
-# ─── Transcribe ───────────────────────────────────────────────────────────────
-
 def transcribe(audio_path: str) -> str:
     try:
         with open(audio_path, "rb") as f:
@@ -248,8 +202,6 @@ def transcribe(audio_path: str) -> str:
         return response if isinstance(response, str) else getattr(response, "text", str(response))
     except Exception as e:
         return f"[Transcription failed: {e}]"
-
-# ─── Gemini sentiment ─────────────────────────────────────────────────────────
 
 def analyze_sentiment(transcript: str, product: str, title: str) -> dict:
     safe_title      = title.replace('"', "'")
@@ -284,7 +236,6 @@ confidence must be exactly one of: high, medium, low
         if match:
             raw = match.group(0)
         return json.loads(raw)
-
     except json.JSONDecodeError:
         try:
             fix_response = client_gemini.models.generate_content(
@@ -303,8 +254,6 @@ confidence must be exactly one of: high, medium, low
         return {"score": 5, "verdict": "Mixed", "summary": f"Analysis failed: {e}",
                 "pros": [], "cons": [], "confidence": "low"}
 
-# ─── Cleanup ──────────────────────────────────────────────────────────────────
-
 def cleanup(*paths):
     for p in paths:
         try:
@@ -312,8 +261,6 @@ def cleanup(*paths):
                 os.remove(p)
         except Exception:
             pass
-
-# ─── Helpers ──────────────────────────────────────────────────────────────────
 
 VERDICT_COLORS = {
     "Very Positive": "#1D9E75",
@@ -334,17 +281,12 @@ def fmt_duration(secs):
     m, s = divmod(int(secs), 60)
     return f"{m}:{s:02d}"
 
-# ─── Dashboard ────────────────────────────────────────────────────────────────
-
-
 def gemini_master_review(product: str, results: list[dict]) -> str:
-    """Single Gemini call: synthesized product review in Gemini's own voice."""
     valid = [r for r in results if isinstance(r.get("score"), int)]
     if not valid:
         return "Not enough data to generate a master review."
 
     avg = round(sum(r["score"] for r in valid) / len(valid), 1)
-
     digest_lines = []
     for i, r in enumerate(valid, 1):
         platform_label = "YouTube" if r["platform"] == "youtube" else "YouTube Short"
@@ -360,7 +302,6 @@ def gemini_master_review(product: str, results: list[dict]) -> str:
         digest_lines.append(line)
 
     digest = "\n\n".join(digest_lines)
-
     prompt = "\n".join([
         "You are Gemini, Google's AI. You have just analyzed " + str(len(valid)) + " independent video reviews of the " + product + ".",
         "The average score across all reviews is " + str(avg) + "/10.",
@@ -405,7 +346,6 @@ def gemini_master_review(product: str, results: list[dict]) -> str:
     except Exception as e:
         return "Could not generate master review: " + str(e)
 
-
 def render_dashboard(product: str, results: list[dict]):
     valid = [r for r in results if isinstance(r.get("score"), int)]
     avg   = round(sum(r["score"] for r in valid) / len(valid), 1) if valid else 0
@@ -436,7 +376,6 @@ def render_dashboard(product: str, results: list[dict]):
 
     st.markdown("---")
 
-    # ── Score bar chart ───────────────────────────────────────────────────────
     st.subheader("Scores across all videos")
     plat_tag = lambda p: "YT" if p == "youtube" else "Short"
     labels   = [f"{plat_tag(r['platform'])} · {r['title'][:42]}" for r in valid]
@@ -462,12 +401,10 @@ def render_dashboard(product: str, results: list[dict]):
         paper_bgcolor="rgba(0,0,0,0)",
         showlegend=False,
     )
-    st.plotly_chart(fig, width='stretch')
+    st.plotly_chart(fig, use_container_width=True)
     st.markdown("---")
 
-    # ── Per-video cards ───────────────────────────────────────────────────────
     st.subheader("Video-by-video breakdown")
-
     for section, platform in [("YouTube (long-form)", "youtube"), ("YouTube Shorts", "shorts")]:
         section_vids = [r for r in results if r["platform"] == platform]
         if not section_vids:
@@ -494,7 +431,7 @@ def render_dashboard(product: str, results: list[dict]):
                 col_thumb, col_meta = st.columns([1, 2])
                 with col_thumb:
                     if thumbnail:
-                        st.image(thumbnail, width='stretch')
+                        st.image(thumbnail, use_container_width=True)
                 with col_meta:
                     st.markdown(f"**[{title}]({url})**")
                     if channel:
@@ -535,8 +472,6 @@ def render_dashboard(product: str, results: list[dict]):
 
                 st.caption(f"Analysis confidence: {conf}")
 
-# ─── Per-video pipeline ───────────────────────────────────────────────────────
-
 def process_video(video: dict, product: str, idx: int, total: int,
                   progress_bar, status_text) -> dict:
     title  = video["title"]
@@ -559,8 +494,6 @@ def process_video(video: dict, product: str, idx: int, total: int,
 
     cleanup(vid_path, audio_path)
     return {**video, **sentiment}
-
-# ─── UI ───────────────────────────────────────────────────────────────────────
 
 st.set_page_config(page_title="Product Sentiment Analyzer", layout="wide")
 st.title("📦 Product Sentiment Analyzer")
@@ -613,7 +546,6 @@ if product and st.button("🔍 Analyze reviews", type="primary"):
     st.markdown("---")
     render_dashboard(product, all_results)
 
-    # Master review
     st.markdown("---")
     st.subheader("Gemini's Master Review")
     st.caption("A synthesized verdict written by Gemini after reading all the reviews above.")
