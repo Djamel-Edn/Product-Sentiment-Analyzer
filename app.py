@@ -287,7 +287,7 @@ def render_dashboard(product: str, results: list[dict]):
         plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
         showlegend=False,
     )
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, width="stretch")
     st.markdown("---")
 
     st.subheader("Video-by-video breakdown")
@@ -306,7 +306,7 @@ def render_dashboard(product: str, results: list[dict]):
                 c_thumb, c_meta = st.columns([1, 2])
                 with c_thumb:
                     if r.get("thumbnail"):
-                        st.image(r["thumbnail"], use_container_width=True)
+                        st.image(r["thumbnail"], width="stretch")
                 with c_meta:
                     st.markdown(f"**[{r['title']}]({r.get('url','#')})**")
                     if r.get("channel"): st.caption(f"Channel: {r['channel']}")
